@@ -32,7 +32,15 @@ async function launch(): Promise<Browser> {
   if (isServerless) {
     // Imported lazily: the module unpacks a Chromium tarball on import, which is
     // a pure cold-start cost on any machine that will never use it.
+    // (This dynamic import is invisible to Vercel's file tracer, which is why
+    // the package is pinned via outputFileTracingIncludes in next.config.ts.)
     const chromium = (await import("@sparticuz/chromium")).default;
+
+    // Skip unpacking the software-GL (swiftshader) libraries. We render a static
+    // A4 document — there is nothing to rasterise on a GPU — and skipping it cuts
+    // both cold-start time and the memory ceiling, which is the usual reason this
+    // dies on a serverless function.
+    chromium.setGraphicsMode = false;
 
     return puppeteer.launch({
       args: chromium.args,

@@ -23,6 +23,27 @@ const nextConfig: NextConfig = {
     "mongoose",
   ],
 
+  /**
+   * Force Chromium into the receipt route's serverless bundle.
+   *
+   * `serverExternalPackages` keeps the bundler's hands off it, but that alone is
+   * not enough on Vercel: the file tracer decides which files ship with each
+   * function, and it cannot see through the *conditional dynamic* import in
+   * src/server/pdf.ts (`await import("@sparticuz/chromium")` behind an
+   * `isServerless` check). Nor can it see the Brotli-compressed binary the
+   * package unpacks at runtime — that's data, not an import.
+   *
+   * The result is a function that deploys happily and then throws the instant
+   * anyone asks for a PDF. So the files are pinned explicitly.
+   *
+   * The route key needs its brackets escaped — it's matched as a glob.
+   */
+  outputFileTracingIncludes: {
+    "/api/receipt/\\[paymentId\\]": [
+      "./node_modules/@sparticuz/chromium/**",
+    ],
+  },
+
   images: {
     // Stripe-hosted product imagery is the only remote source we permit.
     remotePatterns: [{ protocol: "https", hostname: "files.stripe.com" }],
