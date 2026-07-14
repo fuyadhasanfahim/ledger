@@ -1,26 +1,286 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ------------------------------------------------------------------ */
+/* Design tokens. Tailwind v4 is CSS-first, so the theme lives here.   */
+/* Every token is usable as a utility: bg-paper, text-ink, border-rule */
+/* ------------------------------------------------------------------ */
+@theme {
+  /* Warm ledger paper */
+  --color-paper: #e8e6dc;
+  --color-paper-raised: #f0eee6;
+  --color-paper-sunk: #dedbcf;
+
+  /* Ink */
+  --color-ink: #12130f;
+  --color-ink-soft: #4a4b44;
+  --color-ink-faint: #85867c;
+
+  /* Ruled lines / hairlines */
+  --color-rule: #c9c6b8;
+  --color-rule-strong: #a8a596;
+
+  /* Transaction accents */
+  --color-settled: #1a7f4b;
+  --color-pending: #b8791f;
+  --color-failed: #b23a2e;
+  --color-event: #5b4b8a;
+
+  /* Tinted washes for status surfaces */
+  --color-settled-wash: #dbe9e0;
+  --color-pending-wash: #f0e4cd;
+  --color-failed-wash: #f0dcd8;
+  --color-event-wash: #e0dcea;
+
+  /* Type */
+  --font-display: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, "SF Mono", monospace;
+
+  /* One "line" of the ruled paper. */
+  --spacing-line: 1.75rem;
+
+  --radius-card: 2px;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+/* ------------------------------------------------------------------ */
+/* Base                                                                */
+/* ------------------------------------------------------------------ */
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  body {
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-display);
+    /* The ledger paper itself: faint horizontal ruled lines. */
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(var(--spacing-line) - 1px),
+      color-mix(in srgb, var(--color-rule) 45%, transparent)
+        calc(var(--spacing-line) - 1px),
+      color-mix(in srgb, var(--color-rule) 45%, transparent) var(--spacing-line)
+    );
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
+  }
+
+  ::selection {
+    background-color: var(--color-ink);
+    color: var(--color-paper);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* ------------------------------------------------------------------ */
+/* Shared classes.                                                     */
+/*                                                                     */
+/* These are declared with `@utility`, not `@layer components`, because*/
+/* Tailwind v4's `@apply` only resolves *utilities* — a component-layer*/
+/* class cannot be composed into another one. Declaring them as        */
+/* utilities lets `.btn-primary` build on `.btn`, `.h1` on `.display`, */
+/* and so on, which is what keeps this file DRY.                       */
+/* ------------------------------------------------------------------ */
+
+/* --- Layout ------------------------------------------------------- */
+@utility shell {
+  @apply mx-auto w-full max-w-6xl px-6;
+}
+
+@utility shell-narrow {
+  @apply mx-auto w-full max-w-3xl px-6;
+}
+
+@utility section {
+  @apply py-16 md:py-24;
+}
+
+@utility rule {
+  @apply border-0 border-t border-rule;
+}
+
+/* --- Eyebrow: `// checkout · mode=subscription` -------------------- */
+@utility eyebrow {
+  @apply font-mono text-[0.6875rem] uppercase tracking-[0.18em] text-ink-faint;
+}
+
+/* --- Type --------------------------------------------------------- */
+@utility display {
+  @apply font-display font-medium tracking-[-0.02em] text-ink;
+}
+
+@utility h1 {
+  @apply display text-4xl leading-[1.05] md:text-6xl;
+}
+
+@utility h2 {
+  @apply display text-2xl leading-tight md:text-3xl;
+}
+
+@utility h3 {
+  @apply display text-lg leading-snug;
+}
+
+@utility prose-ink {
+  @apply leading-relaxed text-ink-soft;
+}
+
+/* Every number, id, card value, amount. */
+@utility num {
+  @apply font-mono tabular-nums;
+}
+
+/* --- Surfaces ----------------------------------------------------- */
+@utility card {
+  @apply rounded-card border border-rule bg-paper-raised;
+}
+
+@utility card-hover {
+  @apply card transition-colors duration-200 hover:border-ink;
+}
+
+/* Receipt-style split panel. */
+@utility receipt {
+  @apply card divide-y divide-rule;
+}
+
+@utility receipt-row {
+  @apply flex items-baseline justify-between gap-4 px-5 py-3;
+}
+
+@utility receipt-label {
+  @apply font-mono text-xs uppercase tracking-wider text-ink-faint;
+}
+
+@utility receipt-value {
+  @apply num text-sm text-ink;
+}
+
+@utility receipt-total {
+  @apply receipt-row bg-paper-sunk;
+
+  & .receipt-value {
+    @apply text-base font-semibold;
+  }
+}
+
+/* --- Buttons ------------------------------------------------------ */
+@utility btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-card border px-5
+         py-2.5 font-mono text-xs uppercase tracking-[0.12em]
+         transition-all duration-200
+         disabled:pointer-events-none disabled:opacity-45;
+}
+
+@utility btn-primary {
+  @apply btn border-ink bg-ink text-paper hover:bg-transparent hover:text-ink;
+}
+
+@utility btn-secondary {
+  @apply btn border-rule-strong bg-transparent text-ink hover:border-ink hover:bg-paper-sunk;
+}
+
+@utility btn-ghost {
+  @apply btn border-transparent bg-transparent text-ink-soft hover:text-ink;
+}
+
+@utility btn-danger {
+  @apply btn border-failed bg-transparent text-failed hover:bg-failed hover:text-paper;
+}
+
+@utility btn-sm {
+  @apply px-3 py-1.5 text-[0.6875rem];
+}
+
+/* --- Badges / status pills ---------------------------------------- */
+@utility badge {
+  @apply inline-flex items-center gap-1.5 rounded-card border px-2 py-0.5
+         font-mono text-[0.6875rem] uppercase tracking-wider;
+}
+
+@utility badge-settled {
+  @apply badge border-settled/35 bg-settled-wash text-settled;
+}
+
+@utility badge-pending {
+  @apply badge border-pending/35 bg-pending-wash text-pending;
+}
+
+@utility badge-failed {
+  @apply badge border-failed/35 bg-failed-wash text-failed;
+}
+
+@utility badge-event {
+  @apply badge border-event/35 bg-event-wash text-event;
+}
+
+@utility dot {
+  @apply size-1.5 shrink-0 rounded-full bg-current;
+}
+
+/* --- Inputs ------------------------------------------------------- */
+@utility input {
+  @apply w-full rounded-card border border-rule-strong bg-paper-raised px-3 py-2
+         font-mono text-sm text-ink placeholder:text-ink-faint
+         focus:border-ink focus:outline-none;
+}
+
+@utility label {
+  @apply eyebrow mb-1.5 block;
+}
+
+@utility field-error {
+  @apply mt-1.5 font-mono text-xs text-failed;
+}
+
+/* --- Event log feed ----------------------------------------------- */
+@utility event-row {
+  @apply grid grid-cols-[auto_1fr_auto] items-center gap-3 px-4 py-2.5 font-mono text-xs;
+}
+
+/* --- Tables ------------------------------------------------------- */
+@utility table-ledger {
+  @apply w-full border-collapse text-left;
+
+  & th {
+    @apply eyebrow border-b border-rule px-4 py-2.5;
+  }
+
+  & td {
+    @apply border-b border-rule px-4 py-3 text-sm;
+  }
+}
+
+/* --- Links -------------------------------------------------------- */
+@utility link {
+  @apply underline decoration-rule-strong underline-offset-4 transition-colors hover:decoration-ink;
+}
+
+/* Suppress the ruled-paper background inside a panel. */
+@utility no-rules {
+  background-image: none;
+}
+
+/* Framer Motion reads this too, but belt-and-braces for CSS transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

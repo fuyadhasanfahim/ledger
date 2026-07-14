@@ -20,6 +20,9 @@
 # production
 /build
 
+# prisma — the client is generated from schema.prisma on install/build
+/src/generated
+
 # misc
 .DS_Store
 *.pem
@@ -30,8 +33,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files — real secrets never get committed...
 .env*
+# ...but the template must be, so contributors know what to fill in.
+!.env.example
 
 # vercel
 .vercel

@@ -1,0 +1,181 @@
+// Ledger — Prisma schema
+// Prisma 7: the datasource `url` lives in prisma.config.ts, not here.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// A visitor of the demo. Identified by a signed, httpOnly session cookie —
+/// no login, so a client can drive every payment flow immediately.
+model Customer {
+  id               String  @id @default(cuid())
+  sessionId        String  @unique
+  stripeCustomerId String? @unique
+  email            String?
+
+  // Stripe Connect (marketplace seller) — Express account for this demo customer.
+  connectAccountId       String?  @unique
+  connectOnboarded       Boolean  @default(false)
+
+  subscriptions Subscription[]
+  payments      Payment[]
+  access        Access?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt])
+}
+
+enum SubscriptionStatus {
+  incomplete
+  incomplete_expired
+  trialing
+  active
+  past_due
+  canceled
+  unpaid
+  paused
+}
+
+model Subscription {
+  id           String             @id @default(cuid())
+  stripeSubId  String             @unique
+  customerId   String
+  customer     Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  plan               String
+  stripePriceId      String?
+  status             SubscriptionStatus @default(incomplete)
+  currentPeriodEnd   DateTime?
+  cancelAtPeriodEnd  Boolean            @default(false)
+  canceledAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+}
+
+enum PaymentType {
+  one_time
+  subscription
+  marketplace
+}
+
+enum PaymentStatus {
+  pending
+  requires_action
+  succeeded
+  failed
+  refunded
+  partially_refunded
+}
+
+model Payment {
+  id                    String        @id @default(cuid())
+  stripePaymentIntentId String        @unique
+  customerId            String
+  customer              Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  amount      Int // minor units (cents)
+  currency    String        @default("usd")
+  status      PaymentStatus @default(pending)
+  type        PaymentType
+  description String?
+
+  failureCode    String?
+  failureMessage String?
+
+  // Marketplace split (Stripe Connect) — recorded when type = marketplace.
+  platformFee       Int?
+  sellerPayout      Int?
+  connectAccountId  String?
+
+  amountRefunded Int      @default(0)
+  refunds        Refund[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum RefundStatus {
+  pending
+  succeeded
+  failed
+  canceled
+}
+
+model Refund {
+  id             String       @id @default(cuid())
+  stripeRefundId String       @unique
+  paymentId      String
+  payment        Payment      @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  amount Int
+  status RefundStatus @default(pending)
+  reason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([paymentId])
+}
+
+enum WebhookStatus {
+  processed
+  failed
+  ignored
+}
+
+/// The idempotency ledger. `stripeEventId` is UNIQUE — an insert that violates
+/// it means the event was already handled, so a replay is a no-op.
+model WebhookEvent {
+  id            String        @id @default(cuid())
+  stripeEventId String        @unique
+  type          String
+  status        WebhookStatus
+  summary       String
+  error         String?
+  payload       Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([type])
+}
+
+enum AccessReason {
+  one_time_payment
+  subscription_active
+  payment_failed
+  refunded
+  subscription_canceled
+  dunning_exhausted
+  never_granted
+}
+
+model Access {
+  id         String   @id @default(cuid())
+  customerId String   @unique
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  granted Boolean      @default(false)
+  reason  AccessReason @default(never_granted)
+
+  grantedAt DateTime?
+  revokedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
