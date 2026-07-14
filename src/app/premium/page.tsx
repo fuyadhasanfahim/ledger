@@ -12,8 +12,6 @@ import { ONE_TIME_PRODUCT } from "@/lib/catalog";
 import { money, timestamp } from "@/lib/format";
 import { accessFor } from "@/server/access";
 import { currentCustomer } from "@/server/customers";
-import { startOneTimeCheckout } from "@/server/actions";
-import { ActionForm, SubmitButton } from "@/components/action-form";
 import { Badge, Eyebrow, Receipt, ReceiptRow } from "@/components/ui";
 
 export const metadata: Metadata = {
@@ -176,11 +174,13 @@ export default async function PremiumPage(props: PageProps<"/premium">) {
               </p>
             </div>
 
-            <ActionForm action={startOneTimeCheckout} className="mt-6">
-              <SubmitButton className="w-full sm:w-auto">
-                Pay {money(ONE_TIME_PRODUCT.amount)} once
-              </SubmitButton>
-            </ActionForm>
+            <Link
+              href="/checkout?mode=one_time"
+              className="btn-primary mt-6 w-full sm:w-auto"
+            >
+              Pay {money(ONE_TIME_PRODUCT.amount)} once
+              <IconArrowRight size={14} aria-hidden />
+            </Link>
 
             <p className="mt-4 font-mono text-xs text-ink-faint">
               Test mode. Use <span className="text-ink">4242 4242 4242 4242</span>{" "}

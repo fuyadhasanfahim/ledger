@@ -60,9 +60,10 @@ export default async function EventsPage(props: PageProps<"/events">) {
 
         <p className="prose-ink mt-6 text-pretty text-lg">
           Stripe delivers at-least-once, so the same event can arrive twice. The
-          id is claimed against a <span className="num text-ink">UNIQUE</span>{" "}
-          column before any handler runs — a replay loses that race at the
-          database and becomes a no-op.
+          id is claimed against a{" "}
+          <span className="num text-ink">unique index</span> before any handler
+          runs — a replay loses that race inside the database itself and becomes
+          a no-op.
         </p>
       </div>
 
@@ -105,8 +106,8 @@ export default async function EventsPage(props: PageProps<"/events">) {
               Cannot reach the database.
             </p>
             <p className="mt-2 text-sm text-ink-faint">
-              Set <span className="num">DATABASE_URL</span> and run{" "}
-              <span className="num">npx prisma migrate deploy</span>.
+              Set <span className="num">MONGODB_URI</span> and run{" "}
+              <span className="num">npm run db:indexes</span>.
             </p>
           </div>
         ) : (

@@ -6,6 +6,7 @@ import { adminOverview, requireAdmin } from "@/server/admin";
 import { adminLogout } from "@/server/actions";
 import { recentEvents, type FeedEvent } from "@/server/events";
 import { EventFeed } from "@/components/event-feed";
+import { LiveRefresh } from "@/components/live-refresh";
 import { RefundForm } from "@/components/refund-form";
 import { SubmitButton } from "@/components/action-form";
 import {
@@ -16,7 +17,7 @@ import {
   TableWrap,
   type Tone,
 } from "@/components/ui";
-import type { PaymentStatus } from "@/generated/prisma/enums";
+import type { PaymentStatus } from "@/lib/domain";
 
 export const metadata: Metadata = {
   title: "Admin",
@@ -44,6 +45,10 @@ export default async function AdminPage() {
 
   return (
     <div className="shell section">
+      {/* Refunds settle via webhook a moment after the action returns, so the
+          page re-asks the server until the new state shows up. */}
+      <LiveRefresh />
+
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <Eyebrow>admin · test mode</Eyebrow>

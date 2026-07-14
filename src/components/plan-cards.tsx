@@ -1,26 +1,21 @@
 "use client";
 
+import Link from "next/link";
 import { motion } from "motion/react";
-import { IconCheck } from "@tabler/icons-react";
+import { IconArrowRight, IconCheck } from "@tabler/icons-react";
+
 import { PLANS, type PlanId } from "@/lib/catalog";
 import { moneyCompact } from "@/lib/format";
-import { ActionForm, SubmitButton } from "@/components/action-form";
-import { startSubscriptionCheckout } from "@/server/actions";
 import { Eyebrow, cx } from "@/components/ui";
 
 /**
- * Plan gallery. Doubles as the plan *switcher* on the dashboard, where an
- * existing subscription is in play — hence `currentPlan` / `action`.
+ * Plan gallery.
+ *
+ * These are plain links now, not form actions: checkout happens on our own
+ * /checkout page, so the plan travels in the query string rather than a POST.
+ * next/link prefetches, so the page is already warm by the time it's clicked.
  */
-export function PlanCards({
-  currentPlan,
-  action = startSubscriptionCheckout,
-  ctaLabel = "Subscribe",
-}: {
-  currentPlan?: PlanId | null;
-  action?: typeof startSubscriptionCheckout;
-  ctaLabel?: string;
-}) {
+export function PlanCards({ currentPlan }: { currentPlan?: PlanId | null }) {
   return (
     <div className="grid gap-5 sm:grid-cols-2">
       {PLANS.map((plan, index) => {
@@ -88,15 +83,16 @@ export function PlanCards({
                   You&rsquo;re on this plan.
                 </p>
               ) : (
-                <ActionForm action={action}>
-                  <input type="hidden" name="plan" value={plan.id} />
-                  <SubmitButton
-                    variant={plan.featured ? "primary" : "secondary"}
-                    className="w-full"
-                  >
-                    {ctaLabel} {plan.name}
-                  </SubmitButton>
-                </ActionForm>
+                <Link
+                  href={`/checkout?mode=subscription&plan=${plan.id}`}
+                  className={cx(
+                    "w-full",
+                    plan.featured ? "btn-primary" : "btn-secondary",
+                  )}
+                >
+                  Subscribe {plan.name}
+                  <IconArrowRight size={14} aria-hidden />
+                </Link>
               )}
             </div>
           </motion.div>

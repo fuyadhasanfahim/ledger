@@ -143,3 +143,4 @@ export const SCENARIOS: readonly Scenario[] = [
 export function bareNumber(n: string): string {
   return n.replaceAll(" ", "");
 }
+

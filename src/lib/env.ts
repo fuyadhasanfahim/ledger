@@ -12,7 +12,11 @@ import { z } from "zod";
  * with a message naming the variable.
  */
 const serverSchema = z.object({
-  DATABASE_URL: z.url({ error: "DATABASE_URL must be a valid Postgres URL" }),
+  MONGODB_URI: z
+    .string()
+    .startsWith("mongodb", {
+      error: "MONGODB_URI must be a mongodb:// or mongodb+srv:// connection string",
+    }),
 
   STRIPE_SECRET_KEY: z
     .string()
@@ -22,6 +26,17 @@ const serverSchema = z.object({
     }),
 
   STRIPE_WEBHOOK_SECRET: z.string().startsWith("whsec_"),
+
+  /**
+   * Publishable key. Public by design (it ships in the client bundle), but it is
+   * validated here so a missing one fails loudly at boot rather than as a blank
+   * card form at checkout. `pk_test_` is enforced for the same reason as the
+   * secret key: this demo must never touch live mode.
+   */
+  NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: z.string().startsWith("pk_test_", {
+    error:
+      "Refusing to boot with a non-test publishable key. Ledger is a demo — test mode only.",
+  }),
 
   // Signs the visitor session cookie and the admin cookie (HMAC-SHA256).
   SESSION_SECRET: z

@@ -31,7 +31,7 @@ const CAPABILITIES = [
   {
     icon: IconLock,
     title: "Idempotent by database constraint",
-    body: "Event ids are claimed against a UNIQUE column, not an if-statement. Replay the same event a hundred times and access is granted exactly once.",
+    body: "Event ids are claimed against a unique index, not an if-statement — the database settles the race, not application code. Replay the same event a hundred times and access is granted exactly once.",
   },
   {
     icon: IconRepeat,
@@ -168,7 +168,7 @@ export default async function LandingPage() {
             const Icon = capability.icon;
 
             return (
-              <div key={capability.title} className="bg-paper-raised p-6 no-rules">
+              <div key={capability.title} className="bg-paper-raised p-6">
                 <Icon size={18} className="text-ink" aria-hidden />
                 <h3 className="mt-4 font-display text-base font-medium text-ink">
                   {capability.title}
@@ -178,7 +178,7 @@ export default async function LandingPage() {
             );
           })}
 
-          <div className="flex flex-col justify-center bg-paper-sunk p-6 no-rules">
+          <div className="flex flex-col justify-center bg-paper-sunk p-6">
             <Eyebrow>try it</Eyebrow>
             <p className="mt-2 text-sm text-ink-soft">
               Every claim on this page is checkable. Use a declining test card
@@ -203,7 +203,7 @@ export default async function LandingPage() {
         <SectionHeading
           eyebrow="webhook · live"
           title="The event log, as it happens."
-          intro="This is the real webhook feed, not a mock. Start a checkout in another tab and events land here within seconds — signature-verified, deduplicated, written to Postgres."
+          intro="This is the real webhook feed, not a mock. Start a checkout in another tab and events land here within seconds — signature-verified, deduplicated, written to MongoDB."
         />
 
         <EventFeed initial={events} limit={8} />

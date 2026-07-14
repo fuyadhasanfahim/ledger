@@ -2,12 +2,15 @@ import type { Metadata } from "next";
 import { z } from "zod";
 import { IconBuildingStore, IconCheck, IconExternalLink } from "@tabler/icons-react";
 
-import { db } from "@/lib/db";
+import { connectDb } from "@/lib/db";
+import { PaymentModel } from "@/models";
+import { toPayment } from "@/models/map";
 import { MARKETPLACE_LISTING, splitMarketplace } from "@/lib/catalog";
 import { money, timestamp } from "@/lib/format";
 import { currentCustomer } from "@/server/customers";
 import { connectStatus } from "@/server/connect";
-import { startConnectOnboarding, startMarketplaceCheckout } from "@/server/actions";
+import Link from "next/link";
+import { startConnectOnboarding } from "@/server/actions";
 import { ActionForm, SubmitButton } from "@/components/action-form";
 import {
   Badge,
@@ -51,14 +54,16 @@ export default async function ConnectPage(props: PageProps<"/connect">) {
     );
   }
 
-  const [connect, payments] = await Promise.all([
+  await connectDb();
+
+  const [connect, paymentDocs] = await Promise.all([
     connectStatus(customer),
-    db.payment.findMany({
-      where: { customerId: customer.id, type: "marketplace" },
-      orderBy: { createdAt: "desc" },
-      take: 10,
-    }),
+    PaymentModel.find({ customerId: customer.id, type: "marketplace" })
+      .sort({ createdAt: -1 })
+      .limit(10),
   ]);
+
+  const payments = paymentDocs.map(toPayment);
 
   const split = splitMarketplace(MARKETPLACE_LISTING.amount);
 
@@ -172,11 +177,15 @@ export default async function ConnectPage(props: PageProps<"/connect">) {
           </Receipt>
 
           <div className="mt-auto pt-6">
-            <ActionForm action={startMarketplaceCheckout}>
-              <SubmitButton className="w-full" disabled={!connect.onboarded}>
+            {connect.onboarded ? (
+              <Link href="/checkout?mode=marketplace" className="btn-primary w-full">
                 Buy — {money(split.total)}
-              </SubmitButton>
-            </ActionForm>
+              </Link>
+            ) : (
+              <span className="btn-primary pointer-events-none w-full opacity-45">
+                Buy — {money(split.total)}
+              </span>
+            )}
 
             {!connect.onboarded ? (
               <p className="mt-3 font-mono text-xs text-ink-faint">

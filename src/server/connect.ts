@@ -1,7 +1,8 @@
 import "server-only";
 
-import type { Customer } from "@/generated/prisma/client";
-import { db } from "@/lib/db";
+import type { Customer } from "@/lib/domain";
+import { connectDb } from "@/lib/db";
+import { CustomerModel } from "@/models";
 import { env } from "@/lib/env";
 import { log } from "@/lib/logger";
 import { stripe } from "@/lib/stripe";
@@ -30,10 +31,11 @@ export async function ensureConnectAccount(
     { idempotencyKey: `connect:${customer.id}` },
   );
 
-  await db.customer.update({
-    where: { id: customer.id },
-    data: { connectAccountId: account.id },
-  });
+  await connectDb();
+  await CustomerModel.updateOne(
+    { _id: customer.id },
+    { $set: { connectAccountId: account.id } },
+  );
 
   log.info("connect.account_created", {
     customerId: customer.id,
@@ -95,10 +97,11 @@ export async function connectStatus(
 
     // Keep the cached flag honest.
     if (onboarded !== customer.connectOnboarded) {
-      await db.customer.update({
-        where: { id: customer.id },
-        data: { connectOnboarded: onboarded },
-      });
+      await connectDb();
+      await CustomerModel.updateOne(
+        { _id: customer.id },
+        { $set: { connectOnboarded: onboarded } },
+      );
     }
 
     return {

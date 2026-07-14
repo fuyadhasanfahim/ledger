@@ -40,7 +40,7 @@ const COLUMNS: ReadonlyArray<{
 
 export function SiteFooter() {
   return (
-    <footer className="mt-24 border-t border-ink bg-paper-raised no-rules">
+    <footer className="mt-24 border-t border-ink bg-paper-raised">
       <div className="shell py-14">
         <div className="grid gap-10 md:grid-cols-[1.5fr_1fr_1fr_1fr]">
           <div>

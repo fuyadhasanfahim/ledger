@@ -45,7 +45,20 @@ export default function RootLayout({
       lang="en"
       className={`${spaceGrotesk.variable} ${jetbrainsMono.variable}`}
     >
-      <body className="flex min-h-dvh flex-col antialiased">
+      {/*
+        Browser extensions (Grammarly, password managers, dark-mode addons) inject
+        attributes into <body> before React hydrates — e.g. `data-gr-ext-installed`.
+        Server HTML and client DOM then disagree and React warns.
+
+        This suppresses the mismatch for *this element's own attributes only*. It
+        does not extend to children, so a genuine hydration bug anywhere inside the
+        app will still be reported. That containment is the reason it's safe here
+        and shouldn't be sprinkled around more widely.
+      */}
+      <body
+        className="flex min-h-dvh flex-col antialiased"
+        suppressHydrationWarning
+      >
         <TestModeBanner />
         <SiteHeader />
         <main className="flex-1">{children}</main>

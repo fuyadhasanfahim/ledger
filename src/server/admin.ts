@@ -1,21 +1,20 @@
 import "server-only";
 
 import { redirect } from "next/navigation";
-import { db } from "@/lib/db";
+import { connectDb } from "@/lib/db";
 import { isAdmin } from "@/lib/session";
+import { CustomerModel, PaymentModel, SubscriptionModel } from "@/models";
+import { toPayment, toSubscription } from "@/models/map";
+import type { Payment, Subscription } from "@/lib/domain";
 
 /**
  * Authorisation check for every admin surface.
  *
  * The proxy already redirects unauthenticated visitors away from /admin, but
- * that is not sufficient on its own: Server Actions are POSTs to the page's own
- * route, and Next's docs are explicit that a matcher change or a refactor can
- * silently drop proxy coverage for them. So authorisation is asserted *here*,
- * next to the data, and every admin action calls this first.
- *
- * (`forbidden()` would be the more expressive interrupt, but it still sits
- * behind the experimental `authInterrupts` flag in Next 16 — not something to
- * hang a security boundary on. A redirect is stable and does the same job.)
+ * that alone is not sufficient: a Server Action is a POST to the page's own
+ * route, and Next's own docs warn that a matcher change or refactor can silently
+ * drop proxy coverage for it. So authorisation is asserted here, next to the
+ * data, and every admin action calls this first.
  */
 export async function requireAdmin(): Promise<void> {
   if (!(await isAdmin())) {
@@ -23,19 +22,25 @@ export async function requireAdmin(): Promise<void> {
   }
 }
 
-export async function adminOverview() {
-  const [payments, subscriptions, customers] = await Promise.all([
-    db.payment.findMany({
-      orderBy: { createdAt: "desc" },
-      include: { refunds: true },
-      take: 50,
-    }),
-    db.subscription.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 50,
-    }),
-    db.customer.count(),
+export interface AdminOverview {
+  payments: Payment[];
+  subscriptions: Subscription[];
+  customers: number;
+  grossSettled: number;
+  refunded: number;
+  net: number;
+}
+
+export async function adminOverview(): Promise<AdminOverview> {
+  await connectDb();
+
+  const [paymentDocs, subscriptionDocs, customers] = await Promise.all([
+    PaymentModel.find().sort({ createdAt: -1 }).limit(50),
+    SubscriptionModel.find().sort({ createdAt: -1 }).limit(50),
+    CustomerModel.countDocuments(),
   ]);
+
+  const payments = paymentDocs.map(toPayment);
 
   const grossSettled = payments
     .filter((p) => p.status === "succeeded" || p.status === "partially_refunded")
@@ -45,7 +50,7 @@ export async function adminOverview() {
 
   return {
     payments,
-    subscriptions,
+    subscriptions: subscriptionDocs.map(toSubscription),
     customers,
     grossSettled,
     refunded,

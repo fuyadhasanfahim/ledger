@@ -35,9 +35,6 @@
   --font-display: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-jetbrains-mono), ui-monospace, "SF Mono", monospace;
 
-  /* One "line" of the ruled paper. */
-  --spacing-line: 1.75rem;
-
   --radius-card: 2px;
 }
 
@@ -53,17 +50,39 @@
     background-color: var(--color-paper);
     color: var(--color-ink);
     font-family: var(--font-display);
-    /* The ledger paper itself: faint horizontal ruled lines. */
-    background-image: repeating-linear-gradient(
-      to bottom,
-      transparent 0,
-      transparent calc(var(--spacing-line) - 1px),
-      color-mix(in srgb, var(--color-rule) 45%, transparent)
-        calc(var(--spacing-line) - 1px),
-      color-mix(in srgb, var(--color-rule) 45%, transparent) var(--spacing-line)
-    );
-    background-attachment: fixed;
     -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  /**
+   * Paper grain.
+   *
+   * An SVG feTurbulence baked into a data: URI — so it's one repeated tile, no
+   * network request, and no CSP exception (a remote texture would need an
+   * img-src entry, and a canvas-generated one would need 'unsafe-inline').
+   *
+   * It sits in a fixed ::before rather than on `background-image` so it doesn't
+   * scroll with content or tile visibly on long pages. `pointer-events: none`
+   * keeps it from eating clicks, and it's marked aria-hidden implicitly by being
+   * a pseudo-element.
+   */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0.5;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='0.28'/%3E%3C/svg%3E");
+    /* Multiply keeps the grain reading as texture *in* the paper rather than a
+       grey film laid on top of it. */
+    mix-blend-mode: multiply;
+  }
+
+  /* Content sits above the grain. */
+  body > * {
+    position: relative;
+    z-index: 1;
   }
 
   code,
@@ -266,11 +285,6 @@
 /* --- Links -------------------------------------------------------- */
 @utility link {
   @apply underline decoration-rule-strong underline-offset-4 transition-colors hover:decoration-ink;
-}
-
-/* Suppress the ruled-paper background inside a panel. */
-@utility no-rules {
-  background-image: none;
 }
 
 /* Framer Motion reads this too, but belt-and-braces for CSS transitions. */

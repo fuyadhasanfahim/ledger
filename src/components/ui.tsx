@@ -150,7 +150,9 @@ export function FormError({ children }: { children?: string }) {
   if (!children) return null;
 
   return (
-    <p className="field-error" role="alert">
+    // whitespace-pre-line: in development the message carries a second line with
+    // the underlying cause, and it must not collapse onto one.
+    <p className="field-error whitespace-pre-line" role="alert">
       {children}
     </p>
   );

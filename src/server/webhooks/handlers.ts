@@ -4,12 +4,18 @@ import type Stripe from "stripe";
 import {
   PaymentStatus,
   PaymentType,
-  RefundStatus,
   SubscriptionStatus,
-} from "@/generated/prisma/enums";
-import { db } from "@/lib/db";
+  type RefundStatus,
+} from "@/lib/domain";
+import { connectDb } from "@/lib/db";
 import { log } from "@/lib/logger";
 import { stripe } from "@/lib/stripe";
+import {
+  CustomerModel,
+  PaymentModel,
+  RefundModel,
+  SubscriptionModel,
+} from "@/models";
 import { grantAccess, reconcileAccess, revokeAccess } from "@/server/access";
 
 /**
@@ -18,10 +24,10 @@ import { grantAccess, reconcileAccess, revokeAccess } from "@/server/access";
  * Rules every handler obeys:
  *  - They are the ONLY writers of money-derived state (payments, subscriptions,
  *    access). Nothing the browser says can grant access.
- *  - They are individually idempotent (upserts, not inserts), on top of the
- *    event-level dedupe in process.ts. Stripe guarantees at-least-once delivery,
- *    so "handled twice" must be indistinguishable from "handled once".
- *  - They return a human-readable summary, which is what the live event feed
+ *  - They are individually idempotent (upserts, never blind inserts), on top of
+ *    the event-level dedupe in process.ts. Stripe guarantees at-least-once
+ *    delivery, so "handled twice" must be indistinguishable from "handled once".
+ *  - They return a human-readable summary — that string is what the live feed
  *    renders.
  */
 
@@ -31,43 +37,36 @@ export type Handler = (event: Stripe.Event) => Promise<string>;
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Resolve our customer id from an object's metadata, falling back to the Stripe customer. */
+/** Resolve our customer id from metadata, falling back to the Stripe customer. */
 async function resolveCustomerId(
   metadata: Stripe.Metadata | null | undefined,
-  stripeCustomerId?: string | Stripe.Customer | Stripe.DeletedCustomer | null,
+  stripeCustomer?: string | Stripe.Customer | Stripe.DeletedCustomer | null,
 ): Promise<string | null> {
+  await connectDb();
+
   const fromMetadata = metadata?.ledgerCustomerId;
+
   if (fromMetadata) {
-    const exists = await db.customer.findUnique({
-      where: { id: fromMetadata },
-      select: { id: true },
-    });
-    if (exists) return exists.id;
+    const exists = await CustomerModel.exists({ _id: fromMetadata }).catch(
+      // A malformed id (not a valid ObjectId) throws rather than returning null.
+      () => null,
+    );
+    if (exists) return fromMetadata;
   }
 
   const id =
-    typeof stripeCustomerId === "string"
-      ? stripeCustomerId
-      : stripeCustomerId?.id;
+    typeof stripeCustomer === "string" ? stripeCustomer : stripeCustomer?.id;
 
   if (!id) return null;
 
-  const byStripe = await db.customer.findUnique({
-    where: { stripeCustomerId: id },
-    select: { id: true },
-  });
-
-  return byStripe?.id ?? null;
-}
-
-function mapSubStatus(status: Stripe.Subscription.Status): SubscriptionStatus {
-  // Stripe's status strings and our enum are deliberately 1:1.
-  return status as SubscriptionStatus;
+  const doc = await CustomerModel.findOne({ stripeCustomerId: id }).select("_id");
+  return doc ? doc._id.toString() : null;
 }
 
 /** Stripe moved period bounds onto the subscription *item* in recent API versions. */
 function periodEnd(sub: Stripe.Subscription): Date | null {
   const item = sub.items?.data[0];
+
   const seconds =
     (item as { current_period_end?: number } | undefined)?.current_period_end ??
     (sub as unknown as { current_period_end?: number }).current_period_end;
@@ -75,34 +74,27 @@ function periodEnd(sub: Stripe.Subscription): Date | null {
   return typeof seconds === "number" ? new Date(seconds * 1000) : null;
 }
 
-async function upsertSubscription(sub: Stripe.Subscription): Promise<string | null> {
+async function upsertSubscription(
+  sub: Stripe.Subscription,
+): Promise<string | null> {
   const customerId = await resolveCustomerId(sub.metadata, sub.customer);
   if (!customerId) return null;
 
-  const status = mapSubStatus(sub.status);
-  const plan = sub.metadata?.plan ?? "unknown";
-
-  await db.subscription.upsert({
-    where: { stripeSubId: sub.id },
-    create: {
-      stripeSubId: sub.id,
-      customerId,
-      plan,
-      stripePriceId: sub.items.data[0]?.price?.id ?? null,
-      status,
-      currentPeriodEnd: periodEnd(sub),
-      cancelAtPeriodEnd: sub.cancel_at_period_end,
-      canceledAt: sub.canceled_at ? new Date(sub.canceled_at * 1000) : null,
+  await SubscriptionModel.updateOne(
+    { stripeSubId: sub.id },
+    {
+      $set: {
+        customerId,
+        plan: sub.metadata?.plan ?? "unknown",
+        stripePriceId: sub.items.data[0]?.price?.id ?? null,
+        status: sub.status as SubscriptionStatus,
+        currentPeriodEnd: periodEnd(sub),
+        cancelAtPeriodEnd: sub.cancel_at_period_end,
+        canceledAt: sub.canceled_at ? new Date(sub.canceled_at * 1000) : null,
+      },
     },
-    update: {
-      status,
-      plan,
-      stripePriceId: sub.items.data[0]?.price?.id ?? null,
-      currentPeriodEnd: periodEnd(sub),
-      cancelAtPeriodEnd: sub.cancel_at_period_end,
-      canceledAt: sub.canceled_at ? new Date(sub.canceled_at * 1000) : null,
-    },
-  });
+    { upsert: true },
+  );
 
   return customerId;
 }
@@ -117,17 +109,11 @@ const checkoutCompleted: Handler = async (event) => {
   const customerId = await resolveCustomerId(session.metadata, session.customer);
   if (!customerId) return `checkout ${session.id} — no matching customer, ignored`;
 
-  // A subscription checkout is settled by invoice.paid, not here: the session
-  // completing only means the customer finished the form.
-  if (session.mode === "subscription") {
-    return `checkout completed — subscription started for customer ${customerId}`;
-  }
-
-  // For one-time / marketplace, the payment_intent.succeeded event carries the
-  // authoritative amount, so we only record intent here.
-  const amount = session.amount_total ?? 0;
-
-  return `checkout completed — ${session.mode} for ${(amount / 100).toFixed(2)} USD`;
+  // Retained for completeness: we now use our own checkout page, so this only
+  // fires if a hosted Checkout session is created elsewhere. The authoritative
+  // events remain payment_intent.succeeded / invoice.paid.
+  const amount = ((session.amount_total ?? 0) / 100).toFixed(2);
+  return `checkout completed — ${session.mode} for ${amount} USD`;
 };
 
 /* ------------------------------------------------------------------ */
@@ -138,84 +124,80 @@ const paymentSucceeded: Handler = async (event) => {
   const intent = event.data.object as Stripe.PaymentIntent;
 
   const customerId = await resolveCustomerId(intent.metadata, intent.customer);
-  if (!customerId) {
-    return `payment_intent ${intent.id} — no matching customer, ignored`;
-  }
+  if (!customerId) return `payment_intent ${intent.id} — no matching customer, ignored`;
 
   const kind = intent.metadata?.type;
+
   const type: PaymentType =
-    kind === "marketplace" ? PaymentType.marketplace : PaymentType.one_time;
+    kind === "marketplace"
+      ? PaymentType.marketplace
+      : kind === "subscription"
+        ? PaymentType.subscription
+        : PaymentType.one_time;
 
-  const platformFee = intent.metadata?.platformFee
-    ? Number(intent.metadata.platformFee)
-    : null;
-  const sellerPayout = intent.metadata?.sellerPayout
-    ? Number(intent.metadata.sellerPayout)
-    : null;
+  const amount = intent.amount_received || intent.amount;
 
-  await db.payment.upsert({
-    where: { stripePaymentIntentId: intent.id },
-    create: {
-      stripePaymentIntentId: intent.id,
-      customerId,
-      amount: intent.amount_received || intent.amount,
-      currency: intent.currency,
-      status: PaymentStatus.succeeded,
-      type,
-      description: intent.description ?? null,
-      platformFee,
-      sellerPayout,
-      connectAccountId: intent.metadata?.connectAccountId ?? null,
+  await PaymentModel.updateOne(
+    { stripePaymentIntentId: intent.id },
+    {
+      $set: {
+        customerId,
+        amount,
+        currency: intent.currency,
+        status: PaymentStatus.succeeded,
+        type,
+        description: intent.description ?? null,
+        failureCode: null,
+        failureMessage: null,
+        platformFee: intent.metadata?.platformFee
+          ? Number(intent.metadata.platformFee)
+          : null,
+        sellerPayout: intent.metadata?.sellerPayout
+          ? Number(intent.metadata.sellerPayout)
+          : null,
+        connectAccountId: intent.metadata?.connectAccountId ?? null,
+      },
     },
-    update: {
-      status: PaymentStatus.succeeded,
-      amount: intent.amount_received || intent.amount,
-      failureCode: null,
-      failureMessage: null,
-    },
-  });
+    { upsert: true },
+  );
 
   // A marketplace purchase is a transaction, not an entitlement — no access.
   if (type === PaymentType.one_time) {
     await grantAccess(customerId, "one_time_payment");
   }
 
-  const amount = ((intent.amount_received || intent.amount) / 100).toFixed(2);
-  return `payment succeeded — ${amount} USD (${type})`;
+  return `payment succeeded — ${(amount / 100).toFixed(2)} USD (${type})`;
 };
 
 const paymentFailed: Handler = async (event) => {
   const intent = event.data.object as Stripe.PaymentIntent;
 
   const customerId = await resolveCustomerId(intent.metadata, intent.customer);
-  if (!customerId) {
-    return `payment_intent ${intent.id} — no matching customer, ignored`;
-  }
+  if (!customerId) return `payment_intent ${intent.id} — no matching customer, ignored`;
 
   const error = intent.last_payment_error;
   const kind = intent.metadata?.type;
 
-  await db.payment.upsert({
-    where: { stripePaymentIntentId: intent.id },
-    create: {
-      stripePaymentIntentId: intent.id,
-      customerId,
-      amount: intent.amount,
-      currency: intent.currency,
-      status: PaymentStatus.failed,
-      type:
-        kind === "marketplace" ? PaymentType.marketplace : PaymentType.one_time,
-      failureCode: error?.code ?? error?.decline_code ?? null,
-      failureMessage: error?.message ?? null,
+  await PaymentModel.updateOne(
+    { stripePaymentIntentId: intent.id },
+    {
+      $set: {
+        customerId,
+        amount: intent.amount,
+        currency: intent.currency,
+        status: PaymentStatus.failed,
+        type:
+          kind === "marketplace"
+            ? PaymentType.marketplace
+            : PaymentType.one_time,
+        failureCode: error?.code ?? error?.decline_code ?? null,
+        failureMessage: error?.message ?? null,
+      },
     },
-    update: {
-      status: PaymentStatus.failed,
-      failureCode: error?.code ?? error?.decline_code ?? null,
-      failureMessage: error?.message ?? null,
-    },
-  });
+    { upsert: true },
+  );
 
-  // A failed one-time attempt must never leave access behind.
+  // A failed attempt must never leave access behind.
   await reconcileAccess(customerId);
 
   const reason = error?.decline_code ?? error?.code ?? "unknown";
@@ -228,8 +210,9 @@ const paymentFailed: Handler = async (event) => {
 
 /** The subscription id hangs off the invoice's line items in current API versions. */
 function subscriptionIdFromInvoice(invoice: Stripe.Invoice): string | null {
-  const direct = (invoice as unknown as { subscription?: string | { id: string } })
-    .subscription;
+  const direct = (
+    invoice as unknown as { subscription?: string | { id: string } }
+  ).subscription;
 
   if (typeof direct === "string") return direct;
   if (direct && typeof direct === "object") return direct.id;
@@ -254,34 +237,32 @@ const invoicePaid: Handler = async (event) => {
 
   if (!subId) return `invoice ${invoice.id} — not subscription-related, ignored`;
 
-  // Re-fetch the subscription: the invoice alone doesn't carry the current
-  // status/period, and we want the authoritative version.
+  // Re-fetch: the invoice alone doesn't carry the subscription's current status
+  // or period, and we want the authoritative version.
   const sub = await stripe().subscriptions.retrieve(subId);
   const customerId = await upsertSubscription(sub);
 
-  if (!customerId) return `invoice paid — no matching customer, ignored`;
+  if (!customerId) return "invoice paid — no matching customer, ignored";
 
   // Record the money that actually moved.
-  const intentId =
-    typeof (invoice as unknown as { payment_intent?: string }).payment_intent ===
-    "string"
-      ? (invoice as unknown as { payment_intent: string }).payment_intent
-      : null;
+  const intentId = (invoice as unknown as { payment_intent?: unknown })
+    .payment_intent;
 
-  if (intentId && invoice.amount_paid > 0) {
-    await db.payment.upsert({
-      where: { stripePaymentIntentId: intentId },
-      create: {
-        stripePaymentIntentId: intentId,
-        customerId,
-        amount: invoice.amount_paid,
-        currency: invoice.currency,
-        status: PaymentStatus.succeeded,
-        type: PaymentType.subscription,
-        description: `Invoice ${invoice.number ?? invoice.id}`,
+  if (typeof intentId === "string" && invoice.amount_paid > 0) {
+    await PaymentModel.updateOne(
+      { stripePaymentIntentId: intentId },
+      {
+        $set: {
+          customerId,
+          amount: invoice.amount_paid,
+          currency: invoice.currency,
+          status: PaymentStatus.succeeded,
+          type: PaymentType.subscription,
+          description: `Invoice ${invoice.number ?? invoice.id}`,
+        },
       },
-      update: { status: PaymentStatus.succeeded },
-    });
+      { upsert: true },
+    );
   }
 
   if (sub.status === "active" || sub.status === "trialing") {
@@ -293,10 +274,13 @@ const invoicePaid: Handler = async (event) => {
 };
 
 /**
- * Dunning. Stripe retries a failed subscription payment on a schedule; the
+ * Dunning.
+ *
+ * Stripe retries a failed subscription payment on a schedule, and the
  * subscription sits in `past_due` while it does. Access survives the retries —
- * we only revoke when Stripe gives up (`unpaid`/`canceled`), which is what
- * `next_payment_attempt === null` tells us.
+ * we only revoke when Stripe gives up, which is exactly what
+ * `next_payment_attempt === null` tells us. Revoking on the first failure would
+ * lock out every customer whose card had a temporary hiccup.
  */
 const invoicePaymentFailed: Handler = async (event) => {
   const invoice = event.data.object as Stripe.Invoice;
@@ -307,13 +291,12 @@ const invoicePaymentFailed: Handler = async (event) => {
   const sub = await stripe().subscriptions.retrieve(subId);
   const customerId = await upsertSubscription(sub);
 
-  if (!customerId) return `invoice payment failed — no matching customer, ignored`;
+  if (!customerId) return "invoice payment failed — no matching customer, ignored";
 
-  const willRetry = invoice.next_payment_attempt !== null;
+  const nextAttempt = invoice.next_payment_attempt;
 
-  if (willRetry) {
-    // Keep access during the retry window; the UI nags them to fix the card.
-    const retryAt = new Date(invoice.next_payment_attempt! * 1000);
+  if (nextAttempt !== null && nextAttempt !== undefined) {
+    const retryAt = new Date(nextAttempt * 1000);
 
     log.warn("dunning.retry_scheduled", {
       customerId,
@@ -329,7 +312,7 @@ const invoicePaymentFailed: Handler = async (event) => {
 
   log.warn("dunning.exhausted", { customerId, subscriptionId: sub.id });
 
-  return `invoice payment failed — retries exhausted, access revoked`;
+  return "invoice payment failed — retries exhausted, access revoked";
 };
 
 /* ------------------------------------------------------------------ */
@@ -358,18 +341,20 @@ const subscriptionDeleted: Handler = async (event) => {
   const customerId = await resolveCustomerId(sub.metadata, sub.customer);
   if (!customerId) return `subscription ${sub.id} — no matching customer, ignored`;
 
-  await db.subscription.updateMany({
-    where: { stripeSubId: sub.id },
-    data: {
-      status: SubscriptionStatus.canceled,
-      canceledAt: new Date(),
+  await SubscriptionModel.updateOne(
+    { stripeSubId: sub.id },
+    {
+      $set: {
+        status: SubscriptionStatus.canceled,
+        canceledAt: new Date(),
+      },
     },
-  });
+  );
 
   // They may still hold a lifetime one-time payment — don't strip that.
   await reconcileAccess(customerId);
 
-  return `subscription canceled — access reconciled`;
+  return "subscription canceled — access reconciled";
 };
 
 /* ------------------------------------------------------------------ */
@@ -386,46 +371,51 @@ const chargeRefunded: Handler = async (event) => {
 
   if (!intentId) return `charge ${charge.id} — no payment intent, ignored`;
 
-  const payment = await db.payment.findUnique({
-    where: { stripePaymentIntentId: intentId },
+  await connectDb();
+
+  const payment = await PaymentModel.findOne({
+    stripePaymentIntentId: intentId,
   });
 
   if (!payment) return `charge refunded — payment ${intentId} unknown, ignored`;
 
   const fullyRefunded = charge.amount_refunded >= payment.amount;
 
-  await db.payment.update({
-    where: { id: payment.id },
-    data: {
-      amountRefunded: charge.amount_refunded,
-      status: fullyRefunded
-        ? PaymentStatus.refunded
-        : PaymentStatus.partially_refunded,
+  await PaymentModel.updateOne(
+    { _id: payment._id },
+    {
+      $set: {
+        amountRefunded: charge.amount_refunded,
+        status: fullyRefunded
+          ? PaymentStatus.refunded
+          : PaymentStatus.partially_refunded,
+      },
     },
-  });
+  );
 
-  // Mirror each Stripe refund object into our ledger.
-  const refunds = charge.refunds?.data ?? [];
-  for (const refund of refunds) {
-    await db.refund.upsert({
-      where: { stripeRefundId: refund.id },
-      create: {
-        stripeRefundId: refund.id,
-        paymentId: payment.id,
-        amount: refund.amount,
-        status: (refund.status ?? "pending") as RefundStatus,
-        reason: refund.reason ?? null,
+  // Mirror each Stripe refund object into our own ledger.
+  for (const refund of charge.refunds?.data ?? []) {
+    await RefundModel.updateOne(
+      { stripeRefundId: refund.id },
+      {
+        $set: {
+          paymentId: payment._id,
+          amount: refund.amount,
+          status: (refund.status ?? "pending") as RefundStatus,
+          reason: refund.reason ?? null,
+        },
       },
-      update: {
-        status: (refund.status ?? "pending") as RefundStatus,
-      },
-    });
+      { upsert: true },
+    );
   }
 
-  // A full refund on the entitlement-granting payment takes access away.
+  const customerId = payment.customerId.toString();
+
+  // A full refund on the entitlement-granting payment takes access away — but
+  // reconcile afterwards, in case a live subscription still justifies it.
   if (fullyRefunded && payment.type === PaymentType.one_time) {
-    await revokeAccess(payment.customerId, "refunded");
-    await reconcileAccess(payment.customerId);
+    await revokeAccess(customerId, "refunded");
+    await reconcileAccess(customerId);
   }
 
   const amount = (charge.amount_refunded / 100).toFixed(2);
@@ -438,9 +428,7 @@ const chargeRefunded: Handler = async (event) => {
 
 const applicationFeeCreated: Handler = async (event) => {
   const fee = event.data.object as Stripe.ApplicationFee;
-  const amount = (fee.amount / 100).toFixed(2);
-
-  return `application fee collected — ${amount} USD to the platform`;
+  return `application fee collected — ${(fee.amount / 100).toFixed(2)} USD to the platform`;
 };
 
 /* ------------------------------------------------------------------ */
@@ -464,8 +452,3 @@ export const HANDLERS: Record<string, Handler> = {
 
   "application_fee.created": applicationFeeCreated,
 };
-
-/** Event types we knowingly ignore, so the log can say "ignored" not "unhandled". */
-export function isHandled(type: string): boolean {
-  return type in HANDLERS;
-}

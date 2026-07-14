@@ -4,7 +4,8 @@ import { useEffect, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { IconAlertTriangle, IconCheck, IconMinus } from "@tabler/icons-react";
 import type { FeedEvent } from "@/server/events";
-import { relative, shortId } from "@/lib/format";
+import { shortId } from "@/lib/format";
+import { RelativeTime } from "@/components/relative-time";
 import { cx } from "@/components/ui";
 
 /**
@@ -150,9 +151,10 @@ export function EventFeed({
                   </div>
 
                   <div className="text-right">
-                    <p className="whitespace-nowrap text-ink-faint">
-                      {relative(event.createdAt)}
-                    </p>
+                    <RelativeTime
+                      iso={event.createdAt}
+                      className="block whitespace-nowrap text-ink-faint"
+                    />
                     <p className="whitespace-nowrap text-ink-faint/70">
                       {shortId(event.stripeEventId, 8)}
                     </p>

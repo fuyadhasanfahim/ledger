@@ -13,16 +13,10 @@ import {
   adminCookieValue,
   checkAdminPassword,
 } from "@/lib/session";
-import { db } from "@/lib/db";
 import { requireCustomer } from "@/server/customers";
 import { requireAdmin } from "@/server/admin";
-import {
-  createMarketplaceCheckout,
-  createOneTimeCheckout,
-  createSubscriptionCheckout,
-} from "@/server/checkout";
 import { ensureConnectAccount, onboardingLink } from "@/server/connect";
-import { RefundError, refundPayment } from "@/server/refunds";
+import { RefundError, paymentById, refundPayment } from "@/server/refunds";
 import {
   activeSubscription,
   cancelSubscription,
@@ -35,13 +29,16 @@ import {
  *
  * Every one of them:
  *  - validates its input with Zod (never trusts the FormData),
- *  - resolves the actor from the signed session cookie rather than from any id
- *    the client sent,
+ *  - resolves the actor from the signed session cookie rather than any id the
+ *    client sent,
  *  - rate-limits, because each costs a real Stripe API call,
  *  - returns a typed result instead of throwing raw errors at the user.
  *
- * Note what is *absent*: nothing here grants access or marks a payment settled.
+ * Note what is absent: nothing here grants access or marks a payment settled.
  * That is the webhook's job alone.
+ *
+ * Checkout itself is no longer an action — it's an API route that returns a
+ * client secret to the themed Payment Element (see /api/checkout).
  */
 
 export interface ActionResult {
@@ -55,91 +52,29 @@ function fail(error: string): ActionResult {
   return { ok: false, error };
 }
 
+/**
+ * Failure message for an unexpected exception.
+ *
+ * Production stays deliberately vague — a raw error can carry a connection
+ * string or a Stripe internal detail, and this string is rendered in a browser.
+ * Development appends the real cause, because the vague version turns a
+ * five-second fix into a debugging session.
+ */
+function failWithCause(userMessage: string, error: unknown): ActionResult {
+  if (process.env.NODE_ENV === "production") return fail(userMessage);
+
+  const cause =
+    error instanceof Error
+      ? error.message.split("\n").at(-1)?.trim()
+      : String(error);
+
+  return fail(`${userMessage}\n\n[dev] ${cause}`);
+}
+
 /** One rate-limit bucket per IP per action family. */
 async function guard(bucket: string, limit = 10): Promise<boolean> {
   const ip = clientIp(await headers());
   return rateLimit(`${bucket}:${ip}`, limit, 60_000).ok;
-}
-
-/* ------------------------------------------------------------------ */
-/* Checkout                                                            */
-/* ------------------------------------------------------------------ */
-
-const planSchema = z.object({
-  plan: z.enum(["monthly", "yearly"]),
-});
-
-export async function startSubscriptionCheckout(
-  _prev: ActionResult | null,
-  formData: FormData,
-): Promise<ActionResult> {
-  if (!(await guard("checkout"))) {
-    return fail("Too many checkout attempts. Wait a minute and try again.");
-  }
-
-  const parsed = planSchema.safeParse({ plan: formData.get("plan") });
-  if (!parsed.success) return fail("Pick a valid plan.");
-
-  let url: string;
-
-  try {
-    const customer = await requireCustomer();
-    url = await createSubscriptionCheckout(customer, parsed.data.plan);
-  } catch (error) {
-    log.error("action.subscription_checkout_failed", { error });
-    return fail("Could not start checkout. Try again.");
-  }
-
-  // redirect() signals by throwing, so it must sit *outside* the try/catch —
-  // inside, the catch would swallow it and the user would never leave.
-  redirect(url);
-}
-
-export async function startOneTimeCheckout(
-  _prev: ActionResult | null,
-): Promise<ActionResult> {
-  if (!(await guard("checkout"))) {
-    return fail("Too many checkout attempts. Wait a minute and try again.");
-  }
-
-  let url: string;
-
-  try {
-    const customer = await requireCustomer();
-    url = await createOneTimeCheckout(customer);
-  } catch (error) {
-    log.error("action.one_time_checkout_failed", { error });
-    return fail("Could not start checkout. Try again.");
-  }
-
-  redirect(url);
-}
-
-export async function startMarketplaceCheckout(
-  _prev: ActionResult | null,
-): Promise<ActionResult> {
-  if (!(await guard("checkout"))) {
-    return fail("Too many checkout attempts. Wait a minute and try again.");
-  }
-
-  let url: string;
-
-  try {
-    const customer = await requireCustomer();
-
-    if (!customer.connectAccountId) {
-      return fail("Onboard a seller account first.");
-    }
-
-    url = await createMarketplaceCheckout(customer, customer.connectAccountId);
-  } catch (error) {
-    log.error("action.marketplace_checkout_failed", { error });
-    return fail(
-      "Could not start checkout. The connected account may not accept charges yet.",
-    );
-  }
-
-  redirect(url);
 }
 
 /* ------------------------------------------------------------------ */
@@ -161,15 +96,19 @@ export async function startConnectOnboarding(
     url = await onboardingLink(customer);
   } catch (error) {
     log.error("action.connect_onboarding_failed", { error });
-    return fail("Could not create the onboarding link. Try again.");
+    return failWithCause("Could not create the onboarding link.", error);
   }
 
+  // redirect() signals by throwing, so it must sit outside the try/catch —
+  // inside, the catch would swallow it and the user would never leave.
   redirect(url);
 }
 
 /* ------------------------------------------------------------------ */
 /* Subscription management                                             */
 /* ------------------------------------------------------------------ */
+
+const planSchema = z.object({ plan: z.enum(["monthly", "yearly"]) });
 
 export async function switchPlan(
   _prev: ActionResult | null,
@@ -191,9 +130,7 @@ export async function switchPlan(
     await changePlan(customer, subscription, parsed.data.plan);
   } catch (error) {
     log.error("action.switch_plan_failed", { error });
-    return fail(
-      error instanceof Error ? error.message : "Could not change the plan.",
-    );
+    return failWithCause("Could not change the plan.", error);
   }
 
   revalidatePath("/dashboard");
@@ -224,16 +161,14 @@ export async function cancel(
     await cancelSubscription(customer, subscription, parsed.data.mode);
   } catch (error) {
     log.error("action.cancel_failed", { error });
-    return fail("Could not cancel the subscription.");
+    return failWithCause("Could not cancel the subscription.", error);
   }
 
   revalidatePath("/dashboard");
   return OK;
 }
 
-export async function resume(
-  _prev: ActionResult | null,
-): Promise<ActionResult> {
+export async function resume(_prev: ActionResult | null): Promise<ActionResult> {
   if (!(await guard("subscription"))) {
     return fail("Too many attempts. Wait a minute and try again.");
   }
@@ -247,7 +182,7 @@ export async function resume(
     await resumeSubscription(customer, subscription);
   } catch (error) {
     log.error("action.resume_failed", { error });
-    return fail("Could not resume the subscription.");
+    return failWithCause("Could not resume the subscription.", error);
   }
 
   revalidatePath("/dashboard");
@@ -263,9 +198,7 @@ const loginSchema = z.object({
   // Relative paths only — an absolute URL here would be an open redirect.
   next: z
     .string()
-    .refine((v) => v.startsWith("/") && !v.startsWith("//"), {
-      error: "Invalid redirect target",
-    })
+    .refine((v) => v.startsWith("/") && !v.startsWith("//"))
     .default("/admin"),
 });
 
@@ -339,10 +272,7 @@ export async function issueRefund(
   }
 
   try {
-    const payment = await db.payment.findUnique({
-      where: { id: parsed.data.paymentId },
-    });
-
+    const payment = await paymentById(parsed.data.paymentId);
     if (!payment) return fail("That payment no longer exists.");
 
     // The form speaks dollars; Stripe speaks minor units.
@@ -356,7 +286,7 @@ export async function issueRefund(
     if (error instanceof RefundError) return fail(error.message);
 
     log.error("action.refund_failed", { error });
-    return fail("Stripe rejected the refund.");
+    return failWithCause("Stripe rejected the refund.", error);
   }
 
   revalidatePath("/admin");

@@ -1,48 +1,60 @@
 import "server-only";
 
-import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@/generated/prisma/client";
+import mongoose from "mongoose";
 import { env } from "@/lib/env";
 
 /**
- * Prisma 7 has no Rust query engine — it compiles queries and hands them to a
- * driver adapter. We use `PrismaPg` against Neon's *pooled* endpoint, which is
- * what serverless functions should talk to. (Migrations use the direct endpoint;
- * see prisma.config.ts.)
+ * MongoDB connection.
  *
- * Two deliberate details:
+ * Two things this has to get right in a serverless / HMR world:
  *
- * 1. The client is built **lazily**, behind a Proxy. Constructing it reads
- *    `DATABASE_URL`, and `next build` imports every module — so an eager client
- *    would make the build fail on any machine without secrets. Nothing connects
- *    until a query is actually issued.
- * 2. It is memoised on `globalThis` so dev HMR doesn't open a fresh pool on
- *    every reload (the classic "too many connections" crash).
+ * 1. **Never open a second connection.** Next's dev server re-evaluates modules
+ *    on every hot reload, and each serverless invocation may reuse a warm
+ *    container. Both would leak connections until Atlas starts refusing them.
+ *    So the connection *and the in-flight promise* are cached on `globalThis` —
+ *    caching only the connection would still let two concurrent cold requests
+ *    both start a connect.
+ *
+ * 2. **Connect lazily.** Reading MONGODB_URI at import time would break
+ *    `next build` on a machine with no secrets, which is exactly where CI runs.
  */
-function createClient(): PrismaClient {
-  const adapter = new PrismaPg({ connectionString: env().DATABASE_URL });
 
-  return new PrismaClient({
-    adapter,
-    log: env().NODE_ENV === "development" ? ["warn", "error"] : ["error"],
-  });
+interface Cache {
+  conn: typeof mongoose | null;
+  promise: Promise<typeof mongoose> | null;
 }
 
-const globalForPrisma = globalThis as unknown as {
-  prisma?: PrismaClient;
+const globalForMongoose = globalThis as unknown as { mongoose?: Cache };
+
+const cache: Cache = globalForMongoose.mongoose ?? {
+  conn: null,
+  promise: null,
 };
 
-function client(): PrismaClient {
-  const existing = globalForPrisma.prisma;
-  if (existing) return existing;
+globalForMongoose.mongoose = cache;
 
-  const created = createClient();
-  globalForPrisma.prisma = created;
-  return created;
+export async function connectDb(): Promise<typeof mongoose> {
+  if (cache.conn) return cache.conn;
+
+  if (!cache.promise) {
+    cache.promise = mongoose.connect(env().MONGODB_URI, {
+      // Fail fast rather than hanging a request for 30s on a bad URI.
+      serverSelectionTimeoutMS: 8_000,
+      // Mongoose buffers commands while disconnected; in a serverless function
+      // that turns a connection error into a confusing timeout instead of a
+      // clear failure. Surface the real error.
+      bufferCommands: false,
+    });
+  }
+
+  try {
+    cache.conn = await cache.promise;
+  } catch (error) {
+    // Clear the failed promise, otherwise every later request awaits the same
+    // rejected promise and can never recover.
+    cache.promise = null;
+    throw error;
+  }
+
+  return cache.conn;
 }
-
-export const db = new Proxy({} as PrismaClient, {
-  get(_target, prop, receiver) {
-    return Reflect.get(client(), prop, receiver);
-  },
-});

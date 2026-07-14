@@ -3,7 +3,9 @@ import Link from "next/link";
 import { z } from "zod";
 import { IconAlertTriangle, IconClockPause } from "@tabler/icons-react";
 
-import { db } from "@/lib/db";
+import { connectDb } from "@/lib/db";
+import { PaymentModel } from "@/models";
+import { toPayment } from "@/models/map";
 import { PLANS, getPlan } from "@/lib/catalog";
 import { money, timestamp } from "@/lib/format";
 import { accessFor } from "@/server/access";
@@ -13,6 +15,7 @@ import { recentEvents, type FeedEvent } from "@/server/events";
 import { cancel, resume, switchPlan } from "@/server/actions";
 import { ActionForm, SubmitButton } from "@/components/action-form";
 import { EventFeed } from "@/components/event-feed";
+import { LiveRefresh } from "@/components/live-refresh";
 import { PlanCards } from "@/components/plan-cards";
 import {
   Badge,
@@ -23,7 +26,7 @@ import {
   SectionHeading,
   type Tone,
 } from "@/components/ui";
-import type { SubscriptionStatus } from "@/generated/prisma/enums";
+import type { SubscriptionStatus } from "@/lib/domain";
 
 export const metadata: Metadata = {
   title: "Dashboard",
@@ -79,15 +82,16 @@ export default async function DashboardPage(props: PageProps<"/dashboard">) {
     );
   }
 
-  const [subscription, access, lastPayment, events] = await Promise.all([
+  await connectDb();
+
+  const [subscription, access, lastPaymentDoc, events] = await Promise.all([
     activeSubscription(customer.id),
     accessFor(customer.id),
-    db.payment.findFirst({
-      where: { customerId: customer.id },
-      orderBy: { createdAt: "desc" },
-    }),
+    PaymentModel.findOne({ customerId: customer.id }).sort({ createdAt: -1 }),
     recentEvents(10).catch((): FeedEvent[] => []),
   ]);
+
+  const lastPayment = lastPaymentDoc ? toPayment(lastPaymentDoc) : null;
 
   const plan = subscription ? getPlan(subscription.plan) : undefined;
   const meta = subscription ? STATUS_META[subscription.status] : null;
@@ -96,6 +100,10 @@ export default async function DashboardPage(props: PageProps<"/dashboard">) {
 
   return (
     <div className="shell section">
+      {/* Cancels and plan switches only land in our DB once Stripe's webhook
+          confirms them — keep pulling until they do. */}
+      <LiveRefresh />
+
       <div className="max-w-2xl">
         <Eyebrow>dashboard · live state</Eyebrow>
         <h1 className="h1 mt-5 text-balance">Where things stand.</h1>

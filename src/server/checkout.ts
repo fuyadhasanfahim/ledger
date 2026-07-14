@@ -1,9 +1,6 @@
 import "server-only";
 
-import type Stripe from "stripe";
-import type { Customer } from "@/generated/prisma/client";
-import { db } from "@/lib/db";
-import { env } from "@/lib/env";
+import type { Customer } from "@/lib/domain";
 import { log } from "@/lib/logger";
 import { stripe } from "@/lib/stripe";
 import {
@@ -16,215 +13,203 @@ import {
 import { ensureStripeCustomer } from "@/server/customers";
 
 /**
- * All Checkout Sessions are created here, never inline in a route.
+ * Payment intents / subscriptions for our OWN checkout page.
  *
- * We use Stripe-hosted Checkout and redirect to `session.url`. That keeps the
- * card PAN entirely off our origin — we never see it, so the demo's PCI surface
- * is SAQ-A. It's also why there's no `@stripe/stripe-js` in the bundle.
+ * We no longer redirect to Stripe-hosted Checkout. Instead each of these
+ * returns a **client secret**, which the themed Payment Element on /checkout
+ * confirms in the browser.
+ *
+ * The PCI position is unchanged: the card is still entered into Stripe's own
+ * cross-origin iframe (the Element), so the PAN never touches our origin or our
+ * server. We style the iframe via the Appearance API — we don't read from it.
  */
 
-function returnUrls(path: string) {
-  const base = env().APP_URL;
+export type Intent =
+  | { kind: "payment"; clientSecret: string; amount: number }
+  | {
+      kind: "subscription";
+      clientSecret: string;
+      amount: number;
+      subscriptionId: string;
+    };
+
+/* ------------------------------------------------------------------ */
+/* One-time                                                            */
+/* ------------------------------------------------------------------ */
+
+export async function createOneTimeIntent(customer: Customer): Promise<Intent> {
+  const stripeCustomerId = await ensureStripeCustomer(customer);
+
+  const intent = await stripe().paymentIntents.create(
+    {
+      amount: ONE_TIME_PRODUCT.amount,
+      currency: "usd",
+      customer: stripeCustomerId,
+      description: ONE_TIME_PRODUCT.name,
+      automatic_payment_methods: { enabled: true },
+      metadata: { ledgerCustomerId: customer.id, type: "one_time" },
+    },
+    // Reusing the key across retries means a double-click can't open two intents.
+    { idempotencyKey: `one_time:${customer.id}:${Date.now()}` },
+  );
+
+  if (!intent.client_secret) {
+    throw new Error("Stripe returned a PaymentIntent with no client_secret");
+  }
+
+  log.info("intent.created", {
+    kind: "one_time",
+    customerId: customer.id,
+    intentId: intent.id,
+  });
+
   return {
-    success_url: `${base}${path}?status=success&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${base}${path}?status=canceled`,
+    kind: "payment",
+    clientSecret: intent.client_secret,
+    amount: ONE_TIME_PRODUCT.amount,
   };
 }
 
-/** Subscription checkout — `mode: subscription`. */
-export async function createSubscriptionCheckout(
-  customer: Customer,
-  planId: PlanId,
-): Promise<string> {
-  const plan = getPlan(planId);
-  if (!plan) throw new Error(`Unknown plan: ${planId}`);
+/* ------------------------------------------------------------------ */
+/* Marketplace (Connect destination charge)                            */
+/* ------------------------------------------------------------------ */
 
-  const stripeCustomerId = await ensureStripeCustomer(customer);
-
-  const session = await stripe().checkout.sessions.create({
-    mode: "subscription",
-    customer: stripeCustomerId,
-    line_items: [
-      {
-        quantity: 1,
-        price_data: {
-          currency: "usd",
-          unit_amount: plan.amount,
-          recurring: { interval: plan.interval },
-          product_data: {
-            name: `Ledger ${plan.name}`,
-            description: plan.blurb,
-          },
-        },
-      },
-    ],
-    // Carried through to the webhook, which is the only thing we trust.
-    subscription_data: {
-      metadata: { ledgerCustomerId: customer.id, plan: plan.id },
-    },
-    metadata: { ledgerCustomerId: customer.id, plan: plan.id },
-    ...returnUrls("/dashboard"),
-  });
-
-  log.info("checkout.created", {
-    mode: "subscription",
-    plan: plan.id,
-    customerId: customer.id,
-    sessionId: session.id,
-  });
-
-  if (!session.url) throw new Error("Stripe returned a session with no URL");
-  return session.url;
-}
-
-/** One-time payment — `mode: payment`. */
-export async function createOneTimeCheckout(
-  customer: Customer,
-): Promise<string> {
-  const stripeCustomerId = await ensureStripeCustomer(customer);
-
-  const session = await stripe().checkout.sessions.create({
-    mode: "payment",
-    customer: stripeCustomerId,
-    line_items: [
-      {
-        quantity: 1,
-        price_data: {
-          currency: "usd",
-          unit_amount: ONE_TIME_PRODUCT.amount,
-          product_data: {
-            name: ONE_TIME_PRODUCT.name,
-            description: ONE_TIME_PRODUCT.blurb,
-          },
-        },
-      },
-    ],
-    payment_intent_data: {
-      metadata: {
-        ledgerCustomerId: customer.id,
-        type: "one_time",
-      },
-    },
-    metadata: { ledgerCustomerId: customer.id, type: "one_time" },
-    ...returnUrls("/premium"),
-  });
-
-  log.info("checkout.created", {
-    mode: "payment",
-    customerId: customer.id,
-    sessionId: session.id,
-  });
-
-  if (!session.url) throw new Error("Stripe returned a session with no URL");
-  return session.url;
-}
-
-/**
- * Marketplace payment — one charge, split between the platform and a connected
- * seller via `application_fee_amount` + `transfer_data.destination`.
- *
- * This is a "destination charge": the charge is created on the platform, the
- * platform keeps `application_fee_amount`, and Stripe transfers the remainder
- * to the connected account.
- */
-export async function createMarketplaceCheckout(
+export async function createMarketplaceIntent(
   customer: Customer,
   connectAccountId: string,
-): Promise<string> {
+): Promise<Intent> {
   const stripeCustomerId = await ensureStripeCustomer(customer);
   const split = splitMarketplace(MARKETPLACE_LISTING.amount);
 
-  const session = await stripe().checkout.sessions.create({
-    mode: "payment",
+  const intent = await stripe().paymentIntents.create({
+    amount: split.total,
+    currency: "usd",
     customer: stripeCustomerId,
-    line_items: [
-      {
-        quantity: 1,
-        price_data: {
-          currency: "usd",
-          unit_amount: split.total,
-          product_data: {
-            name: MARKETPLACE_LISTING.name,
-            description: MARKETPLACE_LISTING.blurb,
-          },
-        },
-      },
-    ],
-    payment_intent_data: {
-      application_fee_amount: split.platformFee,
-      transfer_data: { destination: connectAccountId },
-      metadata: {
-        ledgerCustomerId: customer.id,
-        type: "marketplace",
-        platformFee: String(split.platformFee),
-        sellerPayout: String(split.sellerPayout),
-        connectAccountId,
-      },
-    },
+    description: MARKETPLACE_LISTING.name,
+    automatic_payment_methods: { enabled: true },
+    // The split: the platform keeps the fee, Stripe transfers the rest.
+    application_fee_amount: split.platformFee,
+    transfer_data: { destination: connectAccountId },
     metadata: {
       ledgerCustomerId: customer.id,
       type: "marketplace",
+      platformFee: String(split.platformFee),
+      sellerPayout: String(split.sellerPayout),
       connectAccountId,
     },
-    ...returnUrls("/connect"),
   });
 
-  log.info("checkout.created", {
-    mode: "marketplace",
+  if (!intent.client_secret) {
+    throw new Error("Stripe returned a PaymentIntent with no client_secret");
+  }
+
+  log.info("intent.created", {
+    kind: "marketplace",
     customerId: customer.id,
     platformFee: split.platformFee,
     sellerPayout: split.sellerPayout,
   });
 
-  if (!session.url) throw new Error("Stripe returned a session with no URL");
-  return session.url;
+  return { kind: "payment", clientSecret: intent.client_secret, amount: split.total };
+}
+
+/* ------------------------------------------------------------------ */
+/* Subscription                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Create an incomplete subscription and hand back the secret to confirm it.
+ *
+ * `payment_behavior: "default_incomplete"` is what makes a custom subscription
+ * flow possible: Stripe creates the subscription in `incomplete` status and
+ * waits for us to confirm the first invoice's payment client-side.
+ *
+ * Note where the secret lives: **`latest_invoice.confirmation_secret`**, not
+ * `latest_invoice.payment_intent.client_secret`. The older field is gone in
+ * current API versions, and expanding the wrong path silently yields undefined.
+ */
+export async function createSubscriptionIntent(
+  customer: Customer,
+  planId: PlanId,
+): Promise<Intent> {
+  const plan = getPlan(planId);
+  if (!plan) throw new Error(`Unknown plan: ${planId}`);
+
+  const stripeCustomerId = await ensureStripeCustomer(customer);
+
+  const subscription = await stripe().subscriptions.create({
+    customer: stripeCustomerId,
+    items: [
+      {
+        price_data: {
+          currency: "usd",
+          unit_amount: plan.amount,
+          recurring: { interval: plan.interval },
+          // Subscription price_data takes a product *id* — unlike Checkout's
+          // line_items, it won't create one inline from `product_data`.
+          product: await ensureProduct(planId),
+        },
+      },
+    ],
+    payment_behavior: "default_incomplete",
+    payment_settings: { save_default_payment_method: "on_subscription" },
+    expand: ["latest_invoice.confirmation_secret"],
+    metadata: { ledgerCustomerId: customer.id, plan: plan.id },
+  });
+
+  const invoice = subscription.latest_invoice;
+
+  const clientSecret =
+    invoice && typeof invoice !== "string"
+      ? invoice.confirmation_secret?.client_secret
+      : undefined;
+
+  if (!clientSecret) {
+    throw new Error(
+      "Subscription has no confirmation_secret — check the expand path.",
+    );
+  }
+
+  log.info("intent.created", {
+    kind: "subscription",
+    plan: plan.id,
+    customerId: customer.id,
+    subscriptionId: subscription.id,
+  });
+
+  return {
+    kind: "subscription",
+    clientSecret,
+    amount: plan.amount,
+    subscriptionId: subscription.id,
+  };
 }
 
 /**
- * Read back a completed Checkout Session so the success page can show what
- * happened *immediately*, without waiting for the webhook to land.
+ * The Stripe Product backing a plan, created on first use.
  *
- * Important: this is for display only. Access is never granted from this —
- * a `?session_id=` in the URL is attacker-controlled, and only the signed
- * webhook is trusted to move money-derived state.
+ * Stripe lets us choose the product id, so we derive it from the plan and make
+ * this idempotent by construction: `retrieve` first, `create` with that exact id
+ * if it's missing. Without a stable id, every subscription would spawn a fresh
+ * product and the Stripe dashboard would fill up with duplicates named the same
+ * thing.
  */
-export async function describeSession(
-  sessionId: string,
-  customer: Customer,
-): Promise<Stripe.Checkout.Session | null> {
+async function ensureProduct(planId: PlanId): Promise<string> {
+  const id = `ledger_${planId}`;
+  const plan = getPlan(planId);
+
   try {
-    const session = await stripe().checkout.sessions.retrieve(sessionId);
-
-    // Don't leak another customer's session back to this visitor.
-    if (session.metadata?.ledgerCustomerId !== customer.id) {
-      log.warn("checkout.session_owner_mismatch", {
-        sessionId,
-        customerId: customer.id,
-      });
-      return null;
-    }
-
-    return session;
-  } catch (error) {
-    log.warn("checkout.session_lookup_failed", { sessionId, error });
-    return null;
+    const existing = await stripe().products.retrieve(id);
+    if (!existing.deleted) return existing.id;
+  } catch {
+    // Not found — fall through and create it.
   }
-}
 
-/** Has the webhook for this session already landed and recorded a payment? */
-export async function paymentForSession(
-  session: Stripe.Checkout.Session,
-): Promise<boolean> {
-  const intentId =
-    typeof session.payment_intent === "string"
-      ? session.payment_intent
-      : session.payment_intent?.id;
-
-  if (!intentId) return false;
-
-  const payment = await db.payment.findUnique({
-    where: { stripePaymentIntentId: intentId },
+  const created = await stripe().products.create({
+    id,
+    name: `Ledger ${plan?.name ?? planId}`,
+    metadata: { plan: planId },
   });
 
-  return payment?.status === "succeeded";
+  return created.id;
 }

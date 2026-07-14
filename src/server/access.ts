@@ -1,103 +1,90 @@
 import "server-only";
 
-import { AccessReason } from "@/generated/prisma/enums";
-import { db } from "@/lib/db";
+import { AccessReason, type Access } from "@/lib/domain";
+import { connectDb } from "@/lib/db";
 import { log } from "@/lib/logger";
+import { AccessModel, PaymentModel, SubscriptionModel } from "@/models";
+import { toAccess } from "@/models/map";
 
 /**
- * Access is the *derived* state at the heart of this demo: it is never set by
- * the browser, only by webhook handlers reacting to what Stripe tells us
- * actually happened. Grant on settled money, revoke on refund / final dunning
- * failure / cancellation.
+ * Access is the derived state at the heart of this demo: never set by the
+ * browser, only by webhook handlers reacting to what Stripe says actually
+ * happened. Granted on settled money; revoked on refund, final dunning failure,
+ * or cancellation.
  */
+
+type GrantReason = Extract<
+  AccessReason,
+  "one_time_payment" | "subscription_active"
+>;
+
+type RevokeReason = Extract<
+  AccessReason,
+  "payment_failed" | "refunded" | "subscription_canceled" | "dunning_exhausted"
+>;
+
 export async function grantAccess(
   customerId: string,
-  reason: Extract<
-    AccessReason,
-    "one_time_payment" | "subscription_active"
-  >,
+  reason: GrantReason,
 ): Promise<void> {
-  await db.access.upsert({
-    where: { customerId },
-    create: {
-      customerId,
-      granted: true,
-      reason,
-      grantedAt: new Date(),
+  await connectDb();
+
+  await AccessModel.updateOne(
+    { customerId },
+    {
+      $set: {
+        granted: true,
+        reason,
+        grantedAt: new Date(),
+        revokedAt: null,
+      },
     },
-    update: {
-      granted: true,
-      reason,
-      grantedAt: new Date(),
-      revokedAt: null,
-    },
-  });
+    { upsert: true },
+  );
 
   log.info("access.granted", { customerId, reason });
 }
 
 export async function revokeAccess(
   customerId: string,
-  reason: Extract<
-    AccessReason,
-    | "payment_failed"
-    | "refunded"
-    | "subscription_canceled"
-    | "dunning_exhausted"
-  >,
+  reason: RevokeReason,
 ): Promise<void> {
-  await db.access.upsert({
-    where: { customerId },
-    create: {
-      customerId,
-      granted: false,
-      reason,
-      revokedAt: new Date(),
-    },
-    update: {
-      granted: false,
-      reason,
-      revokedAt: new Date(),
-    },
-  });
+  await connectDb();
+
+  await AccessModel.updateOne(
+    { customerId },
+    { $set: { granted: false, reason, revokedAt: new Date() } },
+    { upsert: true },
+  );
 
   log.info("access.revoked", { customerId, reason });
 }
 
-export interface AccessState {
-  granted: boolean;
-  reason: AccessReason;
-  grantedAt: Date | null;
-  revokedAt: Date | null;
-}
-
-export async function accessFor(customerId: string): Promise<AccessState> {
-  const row = await db.access.findUnique({ where: { customerId } });
-
-  return {
-    granted: row?.granted ?? false,
-    reason: row?.reason ?? AccessReason.never_granted,
-    grantedAt: row?.grantedAt ?? null,
-    revokedAt: row?.revokedAt ?? null,
-  };
+export async function accessFor(customerId: string): Promise<Access> {
+  await connectDb();
+  const doc = await AccessModel.findOne({ customerId });
+  return toAccess(doc);
 }
 
 /**
- * A customer keeps access if *any* source still justifies it. Called after a
- * revocation trigger so that, say, refunding a one-time payment doesn't strip
- * access from someone who also holds an active subscription.
+ * A customer keeps access if *any* source still justifies it.
+ *
+ * Called after a revocation trigger, so that refunding a one-time payment
+ * doesn't strip access from someone who also holds a live subscription (and
+ * vice versa). Without this, the two flows would quietly fight each other.
  */
 export async function reconcileAccess(customerId: string): Promise<void> {
+  await connectDb();
+
   const [activeSub, settledPayment] = await Promise.all([
-    db.subscription.findFirst({
-      where: { customerId, status: { in: ["active", "trialing"] } },
+    SubscriptionModel.findOne({
+      customerId,
+      status: { $in: ["active", "trialing"] },
     }),
-    db.payment.findFirst({
-      where: {
-        customerId,
-        type: "one_time",
-        status: "succeeded",
-      },
+    PaymentModel.findOne({
+      customerId,
+      type: "one_time",
+      status: "succeeded",
     }),
   ]);
 
@@ -111,9 +98,10 @@ export async function reconcileAccess(customerId: string): Promise<void> {
     return;
   }
 
-  // Nothing justifies access any more. Preserve the *reason* already recorded
-  // by the caller (refund, dunning, cancellation) rather than overwriting it.
-  const current = await db.access.findUnique({ where: { customerId } });
+  // Nothing justifies access any more. Only downgrade if they currently hold it —
+  // and leave the reason the caller already recorded (refund, dunning) intact.
+  const current = await AccessModel.findOne({ customerId });
+
   if (current?.granted) {
     await revokeAccess(customerId, AccessReason.subscription_canceled);
   }

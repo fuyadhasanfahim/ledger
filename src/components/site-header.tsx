@@ -7,7 +7,7 @@ import { NavLinks } from "@/components/nav-links";
  */
 export function SiteHeader() {
   return (
-    <header className="sticky top-0 z-40 border-b border-rule bg-paper/85 backdrop-blur-sm no-rules">
+    <header className="sticky top-0 z-40 border-b border-rule bg-paper/85 backdrop-blur-sm">
       <div className="shell flex h-14 items-center justify-between gap-6">
         <Link
           href="/"

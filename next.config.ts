@@ -6,9 +6,22 @@ const nextConfig: NextConfig = {
   // Typed <Link href> — dead internal links become build errors.
   typedRoutes: true,
 
-  // Prisma 7 uses a native driver adapter (pg); keep it out of the bundler so
-  // server-side native resolution keeps working.
-  serverExternalPackages: ["@prisma/adapter-pg", "pg"],
+  /**
+   * Packages the bundler must leave alone and `require` at runtime instead.
+   *
+   * - `@sparticuz/chromium` unpacks a Chromium tarball from its own package
+   *   directory. Bundled, that directory doesn't exist at runtime and the PDF
+   *   route fails on Vercel with a missing-executable error.
+   * - `puppeteer-core` resolves native/dynamic paths that don't survive bundling.
+   * - `mongoose` pulls in optional native drivers (kerberos, snappy, …) which the
+   *   bundler tries to follow and then warns/fails on. It's a server library;
+   *   it has no business in the bundle graph.
+   */
+  serverExternalPackages: [
+    "@sparticuz/chromium",
+    "puppeteer-core",
+    "mongoose",
+  ],
 
   images: {
     // Stripe-hosted product imagery is the only remote source we permit.

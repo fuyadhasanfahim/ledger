@@ -1,18 +1,21 @@
 import "server-only";
 
-import type { Payment } from "@/generated/prisma/client";
-import { db } from "@/lib/db";
+import type { Payment } from "@/lib/domain";
+import { connectDb } from "@/lib/db";
 import { log } from "@/lib/logger";
 import { stripe } from "@/lib/stripe";
+import { PaymentModel } from "@/models";
+import { toPayment } from "@/models/map";
 
 export class RefundError extends Error {}
 
 /**
- * Issue a refund against a settled payment.
+ * Issue a refund against a settled payment. `amount` is in minor units; omit it
+ * for a full refund.
  *
- * `amount` is in minor units; omit it for a full refund. The resulting access
- * revocation is *not* done here — it happens when `charge.refunded` comes back
- * through the webhook, so the demo proves the same path a real dispute takes.
+ * Access revocation is deliberately NOT done here — it happens when
+ * `charge.refunded` comes back through the webhook, so the demo exercises the
+ * same path a real dispute would take.
  */
 export async function refundPayment(
   payment: Payment,
@@ -43,8 +46,8 @@ export async function refundPayment(
       metadata: { ledgerPaymentId: payment.id },
     },
     {
-      // A double-clicked refund button must not refund twice. Keying on the
-      // payment + amount means the retry collapses onto the same Stripe refund.
+      // A double-clicked refund button must not refund twice. Keying on payment
+      // + amount collapses the retry onto the same Stripe refund.
       idempotencyKey: `refund:${payment.id}:${amount ?? "full"}`,
     },
   );
@@ -56,12 +59,8 @@ export async function refundPayment(
   });
 }
 
-/** Payments an admin can act on. */
-export async function refundablePayments() {
-  return db.payment.findMany({
-    where: { status: { in: ["succeeded", "partially_refunded"] } },
-    orderBy: { createdAt: "desc" },
-    include: { refunds: true, customer: true },
-    take: 50,
-  });
+export async function paymentById(id: string): Promise<Payment | null> {
+  await connectDb();
+  const doc = await PaymentModel.findById(id);
+  return doc ? toPayment(doc) : null;
 }
